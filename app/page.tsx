@@ -10,18 +10,67 @@ import {
   AgentState,
   DisconnectButton,
 } from "@livekit/components-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import { MediaDeviceFailure } from "livekit-client";
 import type { ConnectionDetails } from "@/app/api/connection-details/route";
 import { NoAgentNotification } from "@/app/components/NoAgentNotification";
 import { CloseIcon } from "@/app/components/CloseIcon";
 import { useKrispNoiseFilter } from "@livekit/components-react/krisp";
 
+// Create a shared audio context that can be used across components
+const createSharedAudioContext = () => {
+  if (typeof window !== 'undefined') {
+    try {
+      // Attempt to create a new AudioContext, falling back to webkitAudioContext if necessary
+      return new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+    } catch (e) {
+      console.error('Failed to create AudioContext:', e);
+      return null;
+    }
+  }
+  return null;
+};
+
 export default function Home() {
   const [connectionDetails, updateConnectionDetails] = useState<
     ConnectionDetails | undefined
   >(undefined);
   const [agentState, setAgentState] = useState<AgentState>("disconnected");
+  // Create a ref to hold our shared AudioContext
+  const audioContextRef = useRef<AudioContext | null>(null);
+  
+  useEffect(() => {
+    // Initialize the shared audio context on component mount
+    if (!audioContextRef.current) {
+      audioContextRef.current = createSharedAudioContext();
+      console.log('Created shared AudioContext:', audioContextRef.current);
+    }
+    
+    // Add a global error handler to catch audio-related errors
+    const handleError = (event: ErrorEvent) => {
+      if (event.error && event.error.message && event.error.message.includes('AudioNode')) {
+        console.error('Audio-related error caught:', event.error);
+        if (audioContextRef.current) {
+          console.log('Current AudioContext state:', audioContextRef.current.state);
+        }
+      }
+    };
+    
+    window.addEventListener('error', handleError);
+    
+    // Clean up the audio context on unmount
+    return () => {
+      window.removeEventListener('error', handleError);
+      if (audioContextRef.current) {
+        try {
+          audioContextRef.current.close();
+          console.log('Closed shared AudioContext');
+        } catch (e) {
+          console.error('Error closing AudioContext:', e);
+        }
+      }
+    };
+  }, []);
 
   const onConnectButtonClicked = useCallback(async () => {
     // Generate room connection details, including:
@@ -73,10 +122,11 @@ export default function Home() {
         }}
         className="grid grid-rows-[2fr_1fr] items-center"
       >
-        <SimpleVoiceAssistant onStateChange={setAgentState} />
+        <SimpleVoiceAssistant onStateChange={setAgentState} audioContext={audioContextRef.current} />
         <ControlBar
           onConnectButtonClicked={onConnectButtonClicked}
           agentState={agentState}
+          audioContext={audioContextRef.current}
         />
         <RoomAudioRenderer />
         <NoAgentNotification state={agentState} />
@@ -87,6 +137,7 @@ export default function Home() {
 
 function SimpleVoiceAssistant(props: {
   onStateChange: (state: AgentState) => void;
+  audioContext: AudioContext | null;
 }) {
   const { state, audioTrack } = useVoiceAssistant();
   useEffect(() => {
@@ -99,7 +150,11 @@ function SimpleVoiceAssistant(props: {
         barCount={5}
         trackRef={audioTrack}
         className="agent-visualizer"
-        options={{ minHeight: 24 }}
+        options={{ 
+          minHeight: 24, 
+          // @ts-expect-error - audioContext is valid but not in type definition
+          audioContext: props.audioContext 
+        }}
       />
     </div>
   );
@@ -108,6 +163,7 @@ function SimpleVoiceAssistant(props: {
 function ControlBar(props: {
   onConnectButtonClicked: () => void;
   agentState: AgentState;
+  audioContext: AudioContext | null;
 }) {
   /**
    * Use Krisp background noise reduction when available.
@@ -115,8 +171,22 @@ function ControlBar(props: {
    */
   const krisp = useKrispNoiseFilter();
   useEffect(() => {
-    krisp.setNoiseFilterEnabled(true);
-  }, []);
+    if (krisp) {
+      krisp.setNoiseFilterEnabled(true);
+      // If krisp has a method to set audio context, use it
+      if (props.audioContext) {
+        try {
+          // @ts-expect-error - setAudioContext may exist in newer versions
+          if (typeof krisp.setAudioContext === 'function') {
+            // @ts-expect-error - setAudioContext may exist in newer versions
+            krisp.setAudioContext(props.audioContext);
+          }
+        } catch (e) {
+          console.error('Error setting audio context for noise filter:', e);
+        }
+      }
+    }
+  }, [krisp, props.audioContext]);
 
   return (
     <div className="relative h-[100px]">
